@@ -341,6 +341,27 @@ def main() -> int:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Wrote {summary_path}")
 
+    summary_rows: list[tuple[Any, ...]] = []
+    issue_map = {issue.report_name: issue.error for issue in issues}
+    for report_name, output in outputs.items():
+        summary_rows.append(
+            (
+                report_name,
+                output.get("file"),
+                output.get("row_count"),
+                "error" if report_name in issue_map else "ok",
+                issue_map.get(report_name, ""),
+            )
+        )
+
+    summary_outputs_path = reports_dir / "summary_outputs.csv"
+    write_csv(
+        summary_outputs_path,
+        ["report_name", "file", "row_count", "status", "error"],
+        summary_rows,
+    )
+    print(f"Wrote {summary_outputs_path}")
+
     if issues:
         return 1
     return 0

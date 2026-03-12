@@ -1,12 +1,14 @@
-# Metabase crawler - phase 1
-
-## Status
-Implemented
+# Metabase crawler
 
 ## objective
 Build a simple local crawler for a local Metabase instance running at http://localhost:3000.
 
-## phase 1 scope
+## Phase 1
+
+### status
+Implemented
+
+### scope
 The crawler must only:
 
 1. authenticate to the Metabase API
@@ -14,13 +16,13 @@ The crawler must only:
 3. save raw JSON responses locally
 4. keep the code simple and readable
 
-## explicitly in scope
+### explicitly in scope
 - session-based authentication
 - calling a small number of Metabase API endpoints
 - writing responses to disk
 - organizing output into folders
 
-## explicitly out of scope
+### explicitly out of scope
 - no UI
 - no database
 - no ontology layer
@@ -30,7 +32,7 @@ The crawler must only:
 - no analysis scoring
 - no production hardening
 
-## first target outputs
+### first target outputs
 The project should be able to retrieve and save raw JSON for:
 - session info as needed
 - databases
@@ -38,10 +40,10 @@ The project should be able to retrieve and save raw JSON for:
 - dashboards
 - cards / questions
 
-## design preference
+### design preference
 Keep it minimal, transparent, and easy to inspect.
 
-## Implementation summary
+### Implementation summary
 - implemented in Python (`crawler.py`)
 - loads config from `.env`
 - authenticates with `/api/session`
@@ -49,20 +51,20 @@ Keep it minimal, transparent, and easy to inspect.
 - writes raw outputs to `output/raw`
 - writes per-endpoint metadata to `output/metadata`
 
-# Phase 2
+## Phase 2
 
-## Status
+### Status
 Implemented
 
-## Scope
+### Scope
 Extend retrieval from top-level inventory to structural metadata for databases, tables, and fields.
 
-## In-scope
+### In-scope
 - database detail metadata
 - tables within databases
 - fields within tables
 
-## Out-of-scope
+### Out-of-scope
 - cards/questions detail enrichment
 - dashboards detail enrichment
 - collections detail enrichment
@@ -72,31 +74,31 @@ Extend retrieval from top-level inventory to structural metadata for databases, 
 - semantic reconciliation
 - formalized error-handling framework
 
-## Inputs/config
+### Inputs/config
 - none beyond phase 1
 
-## Required behaviors
+### Required behaviors
 - retrieve database detail for each discovered database
 - retrieve table metadata for each discovered database
 - retrieve field metadata for each discovered table
 - store the retrieved raw responses in a predictable structure
 - preserve identifiers needed for later joining across databases, tables, and fields
 
-## Expected outputs/files
+### Expected outputs/files
 - raw database detail files
 - raw table metadata files
 - raw field metadata files
 
-## Error handling expectations
+### Error handling expectations
 - basic visibility only
 
-## Constraints/non-goals
+### Constraints/non-goals
 - do not redesign prior phases
 - do not build the analysis layer yet
 - do not normalize the retrieved metadata yet
 - keep the phase focused on metadata capture only
 
-## Implementation summary
+### Implementation summary
 - retrieves `/api/database/{id}/metadata` for each discovered database
 - stores database detail files in `output/raw/database_details/{database_id}.json`
 - stores table metadata files in `output/raw/table_metadata/{table_id}.json`
@@ -342,6 +344,7 @@ Create the first analysis outputs from the DuckDB layer to make the retrieved Me
 ### Analysis outputs
 - high-level summary:
   - `output/analysis/reports/summary_overview.json`
+  - `output/analysis/reports/summary_outputs.csv`
 - focused report files:
   - `output/analysis/reports/entity_counts.csv`
   - `output/analysis/reports/relationship_coverage.csv`
@@ -352,3 +355,270 @@ Create the first analysis outputs from the DuckDB layer to make the retrieved Me
   - `output/analysis/reports/relationship_dashboards_to_cards.csv`
   - `output/analysis/reports/relationship_collections_to_contents.csv`
   - `output/analysis/reports/relationship_cards_to_data_model.csv`
+
+## Phase 6
+
+### Status
+Implemented
+
+### Scope
+Enrich the analysis layer with question-definition logic so Metabase assets can be compared based on how they are built, not just what they are named.
+
+### In-scope
+- extracting comparable definition details from cards/questions
+- distinguishing native SQL questions from notebook/GUI questions
+- capturing SQL text where present
+- capturing notebook query structure where present
+- deriving comparison-friendly signals from question definitions
+- linking those signals back to cards, dashboards, collections, databases, tables, and fields
+
+### Out-of-scope
+- final duplicate decisions
+- final retirement recommendations
+- semantic reconciliation across business terms
+- formal lineage reconstruction beyond what is directly available
+- error-handling redesign
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+- raw card/question detail outputs from phase 3
+
+### Required behaviors
+- extract query-definition attributes from cards/questions into analysis-friendly structures
+- preserve whether a card is native SQL or notebook/GUI
+- preserve raw SQL text where available
+- preserve notebook query structure in a comparison-friendly form where available
+- create derived comparison signals such as:
+  - normalized card name
+  - query type
+  - referenced database/table ids
+  - referenced field ids where available
+  - SQL presence flag
+  - notebook-structure presence flag
+- support later comparison of cards that may represent the same metric or business concept
+
+### Expected outputs/files
+- new DuckDB tables or columns for question-definition analysis
+- report outputs summarizing:
+  - native SQL vs notebook cards
+  - cards with similar names but different logic types
+  - cards with similar names and similar data-model references
+  - cards with similar names but divergent definitions
+- reusable SQL queries for these comparisons
+
+### Error handling expectations
+- basic visibility only
+- continue and report
+
+### Constraints/non-goals
+- do not make final duplicate judgments yet
+- do not infer business equivalence from names alone
+- optimize for exposing definitional comparison signals
+- keep the logic inspectable and reviewable
+
+### Implementation summary
+- implemented as a separate script: `analyze_definitions.py`
+- adds a full-refresh DuckDB table `card_definitions` in `output/analysis/metabase.duckdb`
+- extracts expanded question-definition signals from raw card details, including:
+  - normalized card name
+  - query and logic type (`native_sql` vs `notebook` vs `unknown`)
+  - SQL presence/text/normalized text/hash
+  - notebook structure presence and expanded counts (stages, aggregations, breakouts, filters)
+  - referenced database/table/field ids and derived reference signature
+- keeps outputs traceable with `card_id`, `source_file`, and `ingested_at`
+- writes reusable phase 6 SQL query files and CSV reports under existing analysis output folders
+
+### DuckDB additions
+- `card_definitions`:
+  - `card_id`, `card_name`, `normalized_card_name`, `query_type`, `logic_type`, `has_sql`, `sql_text`, `sql_normalized`, `sql_hash`, `has_notebook_structure`, `notebook_stage_count`, `notebook_aggregation_count`, `notebook_breakout_count`, `notebook_filter_count`, `notebook_structure_json`, `notebook_hash`, `database_id`, `card_table_id`, `referenced_table_ids_json`, `referenced_field_ids_json`, `reference_signature`, `source_file`, `ingested_at`
+
+### Analysis outputs
+- high-level summary:
+  - `output/analysis/reports/phase6_summary_overview.json`
+  - `output/analysis/reports/phase6_summary_outputs.csv`
+- focused report files:
+  - `output/analysis/reports/phase6_native_vs_notebook.csv`
+  - `output/analysis/reports/phase6_similar_names_different_logic_types.csv`
+  - `output/analysis/reports/phase6_similar_names_similar_references.csv`
+  - `output/analysis/reports/phase6_similar_names_divergent_definitions.csv`
+- reusable queries:
+  - `output/analysis/queries/phase6_native_vs_notebook.sql`
+  - `output/analysis/queries/phase6_similar_names_different_logic_types.sql`
+  - `output/analysis/queries/phase6_similar_names_similar_references.sql`
+  - `output/analysis/queries/phase6_similar_names_divergent_definitions.sql`
+
+## Phase 7
+
+### Status
+Implemented
+
+### Scope
+Create the first candidate review layer for duplicate, conflicting, and potentially retireable Metabase assets using the structural, relationship, and definition signals produced in phases 1–6.
+
+### In-scope
+- grouping cards/questions into candidate comparison sets
+- surfacing candidate duplicate assets
+- surfacing candidate conflicting-definition assets
+- surfacing candidate retirement/cleanup assets
+- combining signals from:
+  - naming similarity
+  - shared data-model references
+  - query type
+  - SQL/notebook definition characteristics
+  - dashboard usage
+  - collection placement
+  - orphan/unused signals from phase 5
+- producing review-friendly outputs for human inspection
+
+### Out-of-scope
+- automatic deletion or retirement actions
+- final semantic reconciliation
+- definitive business-meaning judgments
+- UI buildout
+- error-handling redesign
+- historical version comparison across runs
+
+### Inputs/config
+- DuckDB analysis store from phases 4–6
+- phase 5 report outputs, where useful
+
+### Required behaviors
+- generate candidate duplicate groups for cards/questions based on multiple signals, not names alone
+- generate candidate conflicting-definition groups where similar names map to materially different logic
+- generate candidate retirement/cleanup groups for assets that appear unused, orphaned, redundant, or superseded
+- preserve the underlying evidence for each candidate signal so findings are reviewable
+- assign each candidate finding a signal type or rationale, such as:
+  - same normalized name
+  - same table/field footprint
+  - same name but different query logic
+  - no dashboard usage
+  - no collection usage
+  - archived/hidden mismatch where relevant
+- keep outputs traceable back to object ids and source assets
+
+### Expected outputs/files
+- candidate duplicate report files
+- candidate conflicting-definition report files
+- candidate retirement/cleanup report files
+- one high-level summary file describing counts by candidate type and signal type
+- reusable SQL queries or analysis scripts supporting those outputs
+
+### Error handling expectations
+- basic visibility only
+- continue and report
+
+### Constraints/non-goals
+- findings are review candidates, not final decisions
+- do not infer semantic equivalence from names alone
+- do not recommend deletion without preserving supporting evidence
+- optimize for human review and audit usefulness
+- keep the scoring/grouping logic inspectable and adjustable
+
+### Implementation summary
+- implemented as a separate script: `analyze_candidates.py`
+- reads from DuckDB (`output/analysis/metabase.duckdb`) and writes candidate outputs to `output/analysis/reports`
+- produces deterministic `candidate_group_id` values using stable hashing of core grouping signals
+- applies label + numeric score + confidence to candidate findings
+- includes retirement/cleanup candidates across cards, dashboards, and collections
+- preserves evidence and traceability fields (object ids, names, usage/context signals, rationale text)
+- writes reusable phase 7 SQL base-query files to `output/analysis/queries`
+
+### Candidate outputs
+- high-level summary:
+  - `output/analysis/reports/candidate_summary_overview.json`
+  - `output/analysis/reports/candidate_summary_outputs.csv`
+- focused candidate reports:
+  - `output/analysis/reports/candidate_duplicates.csv`
+  - `output/analysis/reports/candidate_conflicting_definitions.csv`
+  - `output/analysis/reports/candidate_retirement_cleanup.csv`
+  - `output/analysis/reports/candidate_signal_summary.csv`
+- reusable queries:
+  - `output/analysis/queries/phase7_base_cards.sql`
+  - `output/analysis/queries/phase7_base_dashboards.sql`
+  - `output/analysis/queries/phase7_base_collections.sql`
+  - `output/analysis/queries/phase7_name_groups.sql`
+
+## Phase 8
+
+### Status
+Implemented
+
+### Scope
+Produce a first data-dictionary layer for Metabase structural metadata so databases, tables, and fields can be reviewed in a human-friendly format.
+
+### In-scope
+- database dictionary outputs
+- table dictionary outputs
+- field dictionary outputs
+- flattening key structural metadata into review-friendly outputs
+- preserving identifiers and relationships needed to trace fields to tables and tables to databases
+- producing outputs suitable for audit and extraction planning
+
+### Out-of-scope
+- completeness profiling
+- field value profiling
+- historical depth analysis
+- duplicate detection changes
+- retirement scoring changes
+- extraction planning
+- UI buildout
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+
+### Required behaviors
+- query DuckDB rather than raw JSON
+- produce database, table, and field level dictionary outputs
+- include enough metadata to understand:
+  - what the object is
+  - where it sits
+  - how it is typed
+  - whether it appears active/visible
+  - how it relates to parent objects
+- preserve object ids for traceability
+- keep outputs easy to inspect and reuse
+
+### Expected outputs/files
+- one or more database dictionary outputs
+- one or more table dictionary outputs
+- one or more field dictionary outputs
+- reusable SQL queries supporting those outputs
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- optimize for human review and downstream planning
+- do not attempt completeness or value analysis yet
+- do not infer business meaning beyond available metadata
+- keep the dictionary structure simple and inspectable
+
+### Implementation summary
+- implemented as a separate script: `analyze_dictionary.py`
+- queries DuckDB (`output/analysis/metabase.duckdb`) and writes dictionary outputs under `output/analysis/reports/dictionary`
+- generates one global file each for database, table, and field dictionaries
+- generates per-database dictionary files, including expanded field-join variants
+- preserves ids and parent relationships for traceability across database/table/field levels
+- writes reusable phase 8 SQL query files to `output/analysis/queries`
+- writes summary outputs for report tracking
+
+### Dictionary outputs
+- global dictionary files:
+  - `output/analysis/reports/dictionary/database_dictionary.csv`
+  - `output/analysis/reports/dictionary/table_dictionary.csv`
+  - `output/analysis/reports/dictionary/field_dictionary.csv`
+  - `output/analysis/reports/dictionary/field_dictionary_expanded.csv`
+- per-database files:
+  - `output/analysis/reports/dictionary/per_database/database_{database_id}_{database_slug}_tables.csv`
+  - `output/analysis/reports/dictionary/per_database/database_{database_id}_{database_slug}_fields.csv`
+  - `output/analysis/reports/dictionary/per_database/database_{database_id}_{database_slug}_fields_expanded.csv`
+  - `output/analysis/reports/dictionary/dictionary_per_database_manifest.csv`
+- summary files:
+  - `output/analysis/reports/dictionary_summary_overview.json`
+  - `output/analysis/reports/dictionary_summary_outputs.csv`
+- reusable queries:
+  - `output/analysis/queries/phase8_database_dictionary.sql`
+  - `output/analysis/queries/phase8_table_dictionary.sql`
+  - `output/analysis/queries/phase8_field_dictionary.sql`
+  - `output/analysis/queries/phase8_field_dictionary_expanded.sql`
