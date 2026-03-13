@@ -622,3 +622,93 @@ Produce a first data-dictionary layer for Metabase structural metadata so databa
   - `output/analysis/queries/phase8_table_dictionary.sql`
   - `output/analysis/queries/phase8_field_dictionary.sql`
   - `output/analysis/queries/phase8_field_dictionary_expanded.sql`
+
+## Phase 9
+
+### Status
+Implemented
+
+### Scope
+Profile field completeness and observed field values so the crawler moves from structural metadata into basic data-quality and data-meaning assessment.
+
+### In-scope
+- field-level completeness profiling
+- table-level rollups of completeness results
+- observed value profiling for fields where Metabase exposes usable values
+- identifying likely categorical fields versus free-text/high-cardinality fields
+- producing review-friendly outputs for completeness and observed values
+
+### Out-of-scope
+- historical depth analysis
+- extraction planning
+- business-rule interpretation
+- duplicate detection changes
+- retirement scoring changes
+- UI buildout
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+- raw field metadata from earlier phases, including any exposed value/fingerprint metadata
+
+### Required behaviors
+- query DuckDB rather than raw JSON directly
+- calculate field-level completeness signals using available metadata
+- produce table-level summaries of completeness
+- surface observed/available values for fields where Metabase exposes them
+- distinguish between:
+  - completeness signals
+  - observed value signals
+- preserve ids for traceability back to database, table, and field
+- keep outputs easy to review and reuse
+
+### Expected outputs/files
+- field completeness report outputs
+- table completeness summary outputs
+- field value profiling outputs
+- reusable SQL queries supporting those outputs
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- use only what has already been retrieved or can be derived from the current local analysis layer
+- do not infer business meaning beyond the evidence available
+- do not treat observed values as authoritative allowed values unless clearly exposed as such
+- optimize for data understanding and extraction readiness
+- keep the logic simple and inspectable
+
+### Implementation summary
+- implemented as a separate script: `analyze_completeness.py`
+- extends DuckDB `fields` ingestion in `crawler.py` to include completeness/value signals:
+  - `has_field_values`
+  - `fingerprint_distinct_count`
+  - `fingerprint_nil_count`
+  - `fingerprint_nil_pct`
+  - `fingerprint_json`
+- computes field-level completeness signals using both metadata and null-ratio style fingerprint signals
+- computes table-level completeness rollups
+- computes observed-value/cardinality profiling signals
+- writes global and per-database outputs using `completeness_*` naming
+- writes reusable completeness SQL query files
+
+### Completeness outputs
+- global outputs:
+  - `output/analysis/reports/completeness/completeness_field_profile.csv`
+  - `output/analysis/reports/completeness/completeness_table_summary.csv`
+  - `output/analysis/reports/completeness/completeness_field_values_profile.csv`
+  - `output/analysis/reports/completeness/completeness_field_values_profile_expanded.csv`
+  - `output/analysis/reports/completeness/completeness_per_database_manifest.csv`
+- per-database outputs:
+  - `output/analysis/reports/completeness/per_database/database_{database_id}_{database_slug}_completeness_field_profile.csv`
+  - `output/analysis/reports/completeness/per_database/database_{database_id}_{database_slug}_completeness_table_summary.csv`
+  - `output/analysis/reports/completeness/per_database/database_{database_id}_{database_slug}_completeness_field_values_profile.csv`
+  - `output/analysis/reports/completeness/per_database/database_{database_id}_{database_slug}_completeness_field_values_profile_expanded.csv`
+- summary outputs:
+  - `output/analysis/reports/completeness_summary_overview.json`
+  - `output/analysis/reports/completeness_summary_outputs.csv`
+- reusable queries:
+  - `output/analysis/queries/completeness_field_profile.sql`
+  - `output/analysis/queries/completeness_table_summary.sql`
+  - `output/analysis/queries/completeness_field_values_profile.sql`
+  - `output/analysis/queries/completeness_field_values_profile_expanded.sql`

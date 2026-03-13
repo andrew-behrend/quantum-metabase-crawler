@@ -599,6 +599,28 @@ def ingest_phase4_duckdb(output_dir: Path, issues: list[CrawlIssue]) -> dict[str
             if not isinstance(field, dict):
                 continue
 
+            fingerprint = field.get("fingerprint")
+            fingerprint_json = _json_text(fingerprint) if isinstance(fingerprint, dict) else None
+            fingerprint_global = fingerprint.get("global") if isinstance(fingerprint, dict) else None
+            fingerprint_distinct_count = (
+                float(fingerprint_global.get("distinct-count"))
+                if isinstance(fingerprint_global, dict)
+                and isinstance(fingerprint_global.get("distinct-count"), (int, float))
+                else None
+            )
+            fingerprint_nil_count = (
+                float(fingerprint_global.get("nil-count"))
+                if isinstance(fingerprint_global, dict)
+                and isinstance(fingerprint_global.get("nil-count"), (int, float))
+                else None
+            )
+            fingerprint_nil_pct = (
+                float(fingerprint_global.get("nil%"))
+                if isinstance(fingerprint_global, dict)
+                and isinstance(fingerprint_global.get("nil%"), (int, float))
+                else None
+            )
+
             fields_rows.append(
                 (
                     _to_int(field.get("id")),
@@ -612,6 +634,11 @@ def ingest_phase4_duckdb(output_dir: Path, issues: list[CrawlIssue]) -> dict[str
                     field.get("description"),
                     field.get("active"),
                     field.get("visibility_type"),
+                    field.get("has_field_values"),
+                    fingerprint_distinct_count,
+                    fingerprint_nil_count,
+                    fingerprint_nil_pct,
+                    fingerprint_json,
                     field.get("created_at"),
                     field.get("updated_at"),
                     str(field_file),
@@ -824,6 +851,11 @@ def ingest_phase4_duckdb(output_dir: Path, issues: list[CrawlIssue]) -> dict[str
                 description VARCHAR,
                 active BOOLEAN,
                 visibility_type VARCHAR,
+                has_field_values VARCHAR,
+                fingerprint_distinct_count DOUBLE,
+                fingerprint_nil_count DOUBLE,
+                fingerprint_nil_pct DOUBLE,
+                fingerprint_json VARCHAR,
                 created_at VARCHAR,
                 updated_at VARCHAR,
                 source_file VARCHAR,
@@ -944,7 +976,7 @@ def ingest_phase4_duckdb(output_dir: Path, issues: list[CrawlIssue]) -> dict[str
             )
         if fields_rows:
             con.executemany(
-                "INSERT INTO fields VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO fields VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 fields_rows,
             )
         if cards_rows:
