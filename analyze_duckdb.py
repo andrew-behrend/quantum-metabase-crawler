@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import difflib
 import json
 import sys
 from dataclasses import dataclass
@@ -49,6 +50,66 @@ def run_query_to_csv(
         issues.append(AnalysisIssue(report_name, str(exc)))
         print(f"Warning: failed report {report_name}: {exc}", file=sys.stderr)
         return {"file": str(output_file), "row_count": 0}
+
+
+def near_duplicate_rows(
+    con: duckdb.DuckDBPyConnection,
+    similarity_threshold: float = 0.88,
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    candidates = con.execute(
+        """
+        WITH names AS (
+            SELECT 'cards' AS entity_type, card_id::VARCHAR AS entity_id, name FROM cards
+            UNION ALL
+            SELECT 'dashboards', dashboard_id::VARCHAR, name FROM dashboards
+            UNION ALL
+            SELECT 'collections', collection_id, name FROM collections
+            UNION ALL
+            SELECT 'tables', table_id::VARCHAR, name FROM tables
+        )
+        SELECT entity_type, entity_id, name
+        FROM names
+        WHERE COALESCE(TRIM(name), '') <> ''
+        ORDER BY entity_type, entity_id
+        """
+    ).fetchall()
+
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for entity_type, entity_id, name in candidates:
+        if isinstance(entity_type, str) and isinstance(entity_id, str) and isinstance(name, str):
+            grouped.setdefault(entity_type, []).append((entity_id, name))
+
+    rows: list[tuple[Any, ...]] = []
+    for entity_type, items in grouped.items():
+        for i in range(len(items)):
+            left_id, left_name = items[i]
+            for j in range(i + 1, len(items)):
+                right_id, right_name = items[j]
+                ratio = difflib.SequenceMatcher(
+                    None, left_name.lower().strip(), right_name.lower().strip()
+                ).ratio()
+                if ratio >= similarity_threshold and left_name != right_name:
+                    rows.append(
+                        (
+                            entity_type,
+                            left_id,
+                            left_name,
+                            right_id,
+                            right_name,
+                            round(ratio, 4),
+                        )
+                    )
+
+    rows.sort(key=lambda r: (r[0], -float(r[5]), r[2], r[4]))
+    columns = [
+        "entity_type",
+        "left_entity_id",
+        "left_name",
+        "right_entity_id",
+        "right_name",
+        "similarity_score",
+    ]
+    return columns, rows
 
 
 def main() -> int:
@@ -325,6 +386,23 @@ def main() -> int:
     try:
         for report_name, sql in queries.items():
             outputs[report_name] = run_query_to_csv(con, report_name, sql, reports_dir, issues)
+
+        near_dup_path = reports_dir / "potential_name_near_duplicates.csv"
+        try:
+            columns, rows = near_duplicate_rows(con)
+            write_csv(near_dup_path, columns, rows)
+            outputs["potential_name_near_duplicates"] = {
+                "file": str(near_dup_path),
+                "row_count": len(rows),
+            }
+            print(f"Wrote {near_dup_path} ({len(rows)} rows)")
+        except Exception as exc:  # noqa: BLE001
+            issues.append(AnalysisIssue("potential_name_near_duplicates", str(exc)))
+            outputs["potential_name_near_duplicates"] = {
+                "file": str(near_dup_path),
+                "row_count": 0,
+            }
+            print(f"Warning: failed report potential_name_near_duplicates: {exc}", file=sys.stderr)
     finally:
         con.close()
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,39 @@ class CrawlIssue:
     error: str
 
 
+@dataclass(frozen=True)
+class RequestEvent:
+    phase: str
+    target: str
+    status: str
+    attempts: int
+    status_code: int | None
+    error_kind: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True)
+class CrawlError(Exception):
+    kind: str
+    message: str
+    status_code: int | None = None
+    attempts: int = 1
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {self.message}"
+
+
+class ExitCode:
+    OK = 0
+    CONFIG = 2
+    AUTH = 3
+    NETWORK = 4
+    API = 5
+    WRITE = 6
+    DATA = 7
+    PARTIAL = 11
+
+
 TOP_LEVEL_ENDPOINTS: tuple[EndpointSpec, ...] = (
     EndpointSpec("/api/database", "databases.json", "databases.meta.json"),
     EndpointSpec("/api/collection", "collections.json", "collections.meta.json"),
@@ -41,20 +76,54 @@ def utc_now_iso() -> str:
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+        raise CrawlError("CONFIG", f"Missing required environment variable: {name}")
     return value
 
 
 def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise CrawlError("WRITE", f"Failed writing {path}: {exc}") from exc
 
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def authenticate(base_url: str, username: str, password: str) -> str:
+def parse_optional_int_env(name: str, default: int, min_value: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise CrawlError("CONFIG", f"{name} must be an integer, got: {raw}") from exc
+    if value < min_value:
+        raise CrawlError("CONFIG", f"{name} must be >= {min_value}, got: {value}")
+    return value
+
+
+def parse_optional_float_env(name: str, default: float, min_value: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise CrawlError("CONFIG", f"{name} must be a number, got: {raw}") from exc
+    if value < min_value:
+        raise CrawlError("CONFIG", f"{name} must be >= {min_value}, got: {value}")
+    return value
+
+
+def authenticate(
+    base_url: str,
+    username: str,
+    password: str,
+    auth_timeout_seconds: int,
+) -> str:
     auth_url = f"{base_url}/api/session"
     print(f"Authenticating to {auth_url}...")
 
@@ -62,47 +131,82 @@ def authenticate(base_url: str, username: str, password: str) -> str:
         response = requests.post(
             auth_url,
             json={"username": username, "password": password},
-            timeout=30,
+            timeout=auth_timeout_seconds,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"Authentication request failed: {exc}") from exc
+        raise CrawlError("NETWORK", f"Authentication request failed: {exc}") from exc
 
     if response.status_code != 200:
-        raise RuntimeError(
+        raise CrawlError(
+            "AUTH",
             "Authentication failed "
-            f"(status={response.status_code}, body={response.text[:500]})"
+            f"(status={response.status_code}, body={response.text[:500]})",
+            status_code=response.status_code,
         )
 
     try:
         body = response.json()
     except ValueError as exc:
-        raise RuntimeError("Authentication response was not valid JSON") from exc
+        raise CrawlError("AUTH", "Authentication response was not valid JSON") from exc
 
     token = body.get("id")
     if not token:
-        raise RuntimeError("Authentication succeeded but no session token was returned")
+        raise CrawlError("AUTH", "Authentication succeeded but no session token was returned")
 
     print("Authentication successful.")
     return token
 
 
-def get_json(url: str, headers: dict[str, str], timeout: int = 60) -> tuple[Any, requests.Response]:
-    try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Request failed: {exc}") from exc
+def get_json(
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: int,
+    max_retries: int,
+    backoff_seconds: float,
+) -> tuple[Any, requests.Response, int]:
+    attempts = 0
+    last_error: CrawlError | None = None
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"API request failed (status={response.status_code}, body={response.text[:500]})"
+    for attempt in range(max_retries + 1):
+        attempts = attempt + 1
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout_seconds)
+        except requests.RequestException as exc:
+            last_error = CrawlError("NETWORK", f"Request failed: {exc}", attempts=attempts)
+            if attempt < max_retries:
+                time.sleep(backoff_seconds * (2**attempt))
+                continue
+            raise last_error from exc
+
+        if response.status_code == 200:
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise CrawlError("API", "Response was not valid JSON", attempts=attempts) from exc
+            return payload, response, attempts
+
+        if response.status_code == 429 or 500 <= response.status_code <= 599:
+            last_error = CrawlError(
+                "API",
+                f"Transient API response (status={response.status_code}, body={response.text[:500]})",
+                status_code=response.status_code,
+                attempts=attempts,
+            )
+            if attempt < max_retries:
+                time.sleep(backoff_seconds * (2**attempt))
+                continue
+            raise last_error
+
+        raise CrawlError(
+            "API",
+            f"API request failed (status={response.status_code}, body={response.text[:500]})",
+            status_code=response.status_code,
+            attempts=attempts,
         )
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError("Response was not valid JSON") from exc
-
-    return payload, response
+    if last_error:
+        raise last_error
+    raise CrawlError("UNKNOWN", "Unexpected request failure path")
 
 
 def extract_entity_list(payload: Any) -> list[dict[str, Any]] | None:
@@ -123,6 +227,10 @@ def fetch_top_level_inventory(
     raw_dir: Path,
     metadata_dir: Path,
     issues: list[CrawlIssue],
+    request_events: list[RequestEvent],
+    request_timeout_seconds: int,
+    max_retries: int,
+    backoff_seconds: float,
 ) -> dict[str, Any]:
     headers = {"X-Metabase-Session": session_token}
     payloads: dict[str, Any] = {}
@@ -133,9 +241,37 @@ def fetch_top_level_inventory(
         print(f"Fetching {endpoint.path}...")
 
         try:
-            payload, response = get_json(url, headers=headers)
-        except RuntimeError as exc:
+            payload, response, attempts = get_json(
+                url=url,
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="top_level",
+                    target=endpoint.path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=response.status_code,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("top_level", endpoint.path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="top_level",
+                    target=endpoint.path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {endpoint.path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -186,6 +322,10 @@ def fetch_phase2_metadata(
     databases: Any,
     output_dir: Path,
     issues: list[CrawlIssue],
+    request_events: list[RequestEvent],
+    request_timeout_seconds: int,
+    max_retries: int,
+    backoff_seconds: float,
 ) -> dict[str, int]:
     headers = {"X-Metabase-Session": session_token}
 
@@ -215,9 +355,37 @@ def fetch_phase2_metadata(
         print(f"Fetching {path}...")
 
         try:
-            db_payload, _ = get_json(url, headers=headers)
-        except RuntimeError as exc:
+            db_payload, _, attempts = get_json(
+                url=url,
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="phase2",
+                    target=path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=200,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("phase2", path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="phase2",
+                    target=path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -294,6 +462,10 @@ def fetch_phase3_analytical_metadata(
     collections: Any,
     output_dir: Path,
     issues: list[CrawlIssue],
+    request_events: list[RequestEvent],
+    request_timeout_seconds: int,
+    max_retries: int,
+    backoff_seconds: float,
 ) -> dict[str, int]:
     headers = {"X-Metabase-Session": session_token}
 
@@ -346,9 +518,37 @@ def fetch_phase3_analytical_metadata(
         print(f"Fetching {path}...")
 
         try:
-            card_payload, _ = get_json(f"{base_url}{path}", headers=headers)
-        except RuntimeError as exc:
+            card_payload, _, attempts = get_json(
+                url=f"{base_url}{path}",
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=200,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("phase3", path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -380,9 +580,37 @@ def fetch_phase3_analytical_metadata(
         print(f"Fetching {path}...")
 
         try:
-            dashboard_payload, _ = get_json(f"{base_url}{path}", headers=headers)
-        except RuntimeError as exc:
+            dashboard_payload, _, attempts = get_json(
+                url=f"{base_url}{path}",
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=200,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("phase3", path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -427,9 +655,37 @@ def fetch_phase3_analytical_metadata(
 
         print(f"Fetching {detail_path}...")
         try:
-            collection_payload, _ = get_json(f"{base_url}{detail_path}", headers=headers)
-        except RuntimeError as exc:
+            collection_payload, _, attempts = get_json(
+                url=f"{base_url}{detail_path}",
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=detail_path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=200,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("phase3", detail_path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=detail_path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {detail_path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -441,9 +697,37 @@ def fetch_phase3_analytical_metadata(
 
         print(f"Fetching {items_path}...")
         try:
-            items_payload, _ = get_json(f"{base_url}{items_path}", headers=headers)
-        except RuntimeError as exc:
+            items_payload, _, attempts = get_json(
+                url=f"{base_url}{items_path}",
+                headers=headers,
+                timeout_seconds=request_timeout_seconds,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
+            )
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=items_path,
+                    status="success",
+                    attempts=attempts,
+                    status_code=200,
+                    error_kind=None,
+                    error_message=None,
+                )
+            )
+        except CrawlError as exc:
             issues.append(CrawlIssue("phase3", items_path, str(exc)))
+            request_events.append(
+                RequestEvent(
+                    phase="phase3",
+                    target=items_path,
+                    status="failed",
+                    attempts=exc.attempts,
+                    status_code=exc.status_code,
+                    error_kind=exc.kind,
+                    error_message=exc.message,
+                )
+            )
             print(f"Warning: {items_path} failed: {exc}", file=sys.stderr)
             continue
 
@@ -1035,13 +1319,40 @@ def ingest_phase4_duckdb(output_dir: Path, issues: list[CrawlIssue]) -> dict[str
     return counts
 
 
-def write_run_report(metadata_dir: Path, issues: list[CrawlIssue], counts: dict[str, int]) -> None:
+def write_run_report(
+    metadata_dir: Path,
+    issues: list[CrawlIssue],
+    counts: dict[str, int],
+    run_id: str,
+    started_at: str,
+    finished_at: str,
+    request_events: list[RequestEvent],
+) -> None:
+    duration_seconds = (
+        datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
+    ).total_seconds()
     report = {
+        "run_id": run_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": duration_seconds,
         "generated_at": utc_now_iso(),
         "error_count": len(issues),
         "errors": [
             {"scope": issue.scope, "target": issue.target, "error": issue.error}
             for issue in issues
+        ],
+        "request_status_table": [
+            {
+                "phase": event.phase,
+                "target": event.target,
+                "status": event.status,
+                "attempts": event.attempts,
+                "status_code": event.status_code,
+                "error_kind": event.error_kind,
+                "error_message": event.error_message,
+            }
+            for event in request_events
         ],
         "counts": counts,
     }
@@ -1050,28 +1361,54 @@ def write_run_report(metadata_dir: Path, issues: list[CrawlIssue], counts: dict[
 
 def main() -> int:
     load_dotenv()
+    run_id = str(uuid.uuid4())
+    started_at = utc_now_iso()
 
     try:
         base_url = require_env("METABASE_BASE_URL").rstrip("/")
         username = require_env("METABASE_USERNAME")
         password = require_env("METABASE_PASSWORD")
         output_dir = Path(require_env("OUTPUT_DIR"))
-    except RuntimeError as exc:
+        request_timeout_seconds = parse_optional_int_env(
+            "METABASE_REQUEST_TIMEOUT_SECONDS", default=60, min_value=1
+        )
+        auth_timeout_seconds = parse_optional_int_env(
+            "METABASE_AUTH_TIMEOUT_SECONDS", default=30, min_value=1
+        )
+        max_retries = parse_optional_int_env("METABASE_MAX_RETRIES", default=2, min_value=0)
+        backoff_seconds = parse_optional_float_env(
+            "METABASE_BACKOFF_SECONDS", default=1.0, min_value=0.0
+        )
+    except CrawlError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
-        return 1
+        return ExitCode.CONFIG
 
     raw_dir = output_dir / "raw"
     metadata_dir = output_dir / "metadata"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    metadata_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Filesystem error: {exc}", file=sys.stderr)
+        return ExitCode.WRITE
 
     try:
-        session_token = authenticate(base_url, username, password)
-    except RuntimeError as exc:
+        session_token = authenticate(
+            base_url=base_url,
+            username=username,
+            password=password,
+            auth_timeout_seconds=auth_timeout_seconds,
+        )
+    except CrawlError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        if exc.kind == "AUTH":
+            return ExitCode.AUTH
+        if exc.kind == "NETWORK":
+            return ExitCode.NETWORK
+        return ExitCode.API
 
     issues: list[CrawlIssue] = []
+    request_events: list[RequestEvent] = []
 
     top_level_payloads = fetch_top_level_inventory(
         base_url=base_url,
@@ -1079,6 +1416,10 @@ def main() -> int:
         raw_dir=raw_dir,
         metadata_dir=metadata_dir,
         issues=issues,
+        request_events=request_events,
+        request_timeout_seconds=request_timeout_seconds,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
     )
 
     phase2_counts = fetch_phase2_metadata(
@@ -1087,6 +1428,10 @@ def main() -> int:
         databases=top_level_payloads.get("/api/database"),
         output_dir=output_dir,
         issues=issues,
+        request_events=request_events,
+        request_timeout_seconds=request_timeout_seconds,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
     )
 
     phase3_counts = fetch_phase3_analytical_metadata(
@@ -1097,25 +1442,48 @@ def main() -> int:
         collections=top_level_payloads.get("/api/collection"),
         output_dir=output_dir,
         issues=issues,
+        request_events=request_events,
+        request_timeout_seconds=request_timeout_seconds,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
     )
 
     phase4_counts = ingest_phase4_duckdb(output_dir=output_dir, issues=issues)
 
     total_counts = {
+        "run_id": run_id,
         "top_level_success": len(top_level_payloads),
         **phase2_counts,
         **phase3_counts,
         **phase4_counts,
     }
-    write_run_report(metadata_dir, issues, total_counts)
+    finished_at = utc_now_iso()
+    write_run_report(
+        metadata_dir=metadata_dir,
+        issues=issues,
+        counts=total_counts,
+        run_id=run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        request_events=request_events,
+    )
 
     if issues:
         print(f"Crawl complete with {len(issues)} issue(s).", file=sys.stderr)
         print(f"See {metadata_dir / 'crawl-report.json'} for details.", file=sys.stderr)
-        return 1
+        error_kinds = {
+            issue.error.split(":", 1)[0].strip() for issue in issues if ":" in issue.error
+        }
+        if "WRITE" in error_kinds:
+            return ExitCode.WRITE
+        if "NETWORK" in error_kinds:
+            return ExitCode.NETWORK
+        if "API" in error_kinds:
+            return ExitCode.API
+        return ExitCode.PARTIAL
 
     print("Crawl complete.")
-    return 0
+    return ExitCode.OK
 
 
 if __name__ == "__main__":
