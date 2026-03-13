@@ -332,7 +332,7 @@ def main() -> int:
             )
 
         queries: dict[str, str] = {
-            "phase6_native_vs_notebook": """
+            "definitions_native_vs_notebook": """
                 SELECT
                     logic_type,
                     query_type,
@@ -343,7 +343,7 @@ def main() -> int:
                 GROUP BY logic_type, query_type
                 ORDER BY card_count DESC, logic_type, query_type;
             """,
-            "phase6_similar_names_different_logic_types": """
+            "definitions_similar_names_different_logic_types": """
                 WITH name_groups AS (
                     SELECT
                         normalized_card_name,
@@ -366,7 +366,7 @@ def main() -> int:
                 JOIN card_definitions cd ON cd.normalized_card_name = ng.normalized_card_name
                 ORDER BY ng.normalized_card_name, cd.logic_type, cd.card_id;
             """,
-            "phase6_similar_names_similar_references": """
+            "definitions_similar_names_similar_references": """
                 WITH grouped AS (
                     SELECT
                         normalized_card_name,
@@ -384,7 +384,7 @@ def main() -> int:
                 FROM grouped
                 ORDER BY card_count DESC, normalized_card_name;
             """,
-            "phase6_similar_names_divergent_definitions": """
+            "definitions_similar_names_divergent_definitions": """
                 WITH name_groups AS (
                     SELECT
                         normalized_card_name,
@@ -442,7 +442,7 @@ def main() -> int:
             "outputs": outputs,
         }
 
-        summary_json_path = reports_dir / "phase6_summary_overview.json"
+        summary_json_path = reports_dir / "definitions_summary_overview.json"
         summary_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(f"Wrote {summary_json_path}")
 
@@ -459,7 +459,7 @@ def main() -> int:
                 )
             )
 
-        summary_csv_path = reports_dir / "phase6_summary_outputs.csv"
+        summary_csv_path = reports_dir / "definitions_summary_outputs.csv"
         write_csv(
             summary_csv_path,
             ["report_name", "file", "row_count", "status", "error"],
