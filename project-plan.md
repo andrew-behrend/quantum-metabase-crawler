@@ -712,3 +712,448 @@ Profile field completeness and observed field values so the crawler moves from s
   - `output/analysis/queries/completeness_table_summary.sql`
   - `output/analysis/queries/completeness_field_values_profile.sql`
   - `output/analysis/queries/completeness_field_values_profile_expanded.sql`
+
+## Backlog Clean-up 1
+
+### Status
+Implemented
+
+### Scope
+Complete the first set of backlog hardening tasks that do not require external environment/platform actions.
+
+### In-scope
+- formalized crawler error handling
+- retry/backoff behavior for transient request failures
+- configurable request timeout and retry settings via environment variables
+- run-level metadata enrichment for crawl observability
+- non-zero exit code mapping by failure type
+- phase 6 output/report/query filename normalization
+- baseline duplicate-name enhancement beyond exact normalization
+- basic automated tests for core crawler behavior
+- initial README setup/run documentation
+
+### Out-of-scope
+- runtime migration (system Python to managed Python)
+- local virtual environment policy enforcement
+- production credential platform integration
+- any UI-level work
+
+### Inputs/config
+- existing project codebase and backlog requirements
+
+### Required behaviors
+- improve reliability and debuggability without changing core phase objectives
+- preserve compatibility with existing analysis flow where practical
+- keep updates inspectable and lightweight
+
+### Implementation summary
+- added categorized crawler error model and explicit exit codes in `crawler.py`
+- added retry/backoff for transient `429/5xx` and network errors in `crawler.py`
+- added env-configurable reliability settings:
+  - `METABASE_AUTH_TIMEOUT_SECONDS`
+  - `METABASE_REQUEST_TIMEOUT_SECONDS`
+  - `METABASE_MAX_RETRIES`
+  - `METABASE_BACKOFF_SECONDS`
+- expanded crawl run metadata to include:
+  - `run_id`
+  - start/end timestamps
+  - duration
+  - request status table with attempts and error classification
+- renamed phase 6 outputs/queries to `definitions_*` naming in `analyze_definitions.py`
+- added fuzzy near-duplicate name signal output in `analyze_duckdb.py`:
+  - `output/analysis/reports/potential_name_near_duplicates.csv`
+- added baseline unit tests in `tests/test_crawler_core.py`
+- populated `README.md` with setup, run commands, output layout, and exit code references
+
+## Phase 10
+
+### Status
+Implemented
+
+### Scope
+Assess historical depth and temporal coverage of the data exposed through Metabase so you can judge whether key tables and fields are suitable for downstream analysis and modeling.
+
+### In-scope
+- identifying date/time fields that can support historical analysis
+- table-level historical depth profiling
+- per-database historical coverage outputs
+- basic recency and age signals for key tables
+- identifying tables with no usable temporal field
+- producing review-friendly outputs for temporal coverage and historical usefulness
+
+### Out-of-scope
+- extraction planning
+- business-rule interpretation
+- duplicate detection changes
+- retirement scoring changes
+- UI buildout
+- advanced time-series quality assessment
+- throughput benchmarking
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+- any additional temporal/profile outputs added in support of completeness profiling
+
+### Required behaviors
+- query DuckDB rather than raw JSON directly
+- identify candidate temporal fields per table
+- assess available historical range for tables where usable temporal fields exist
+- produce per-table signals such as:
+  - oldest observed value
+  - newest observed value
+  - span length
+  - likely temporal field used
+- produce per-database summaries of historical coverage
+- identify tables that appear unsuitable for historical analysis because they lack usable temporal fields or meaningful span
+- preserve ids for traceability back to database, table, and field
+- keep outputs easy to review and reuse
+
+### Expected outputs/files
+- per-database historical coverage reports
+- table-level historical depth reports
+- candidate temporal field reports
+- reusable SQL queries supporting those outputs
+- high-level summary outputs for historical coverage
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- optimize for assessing historical usefulness, not final extraction design
+- do not infer business meaning beyond the evidence available
+- do not attempt advanced temporal anomaly detection yet
+- keep the logic simple and inspectable
+
+### Implementation summary
+- implemented as a separate script: `analyze_historical.py`
+- queries DuckDB field/table metadata and fingerprint signals to identify temporal candidates
+- derives oldest/newest/span signals from fingerprint temporal range metadata where available
+- applies simple temporal usefulness heuristics:
+  - weak span: `<30 days`
+  - moderate span: `30-364 days`
+  - strong span: `>=365 days`
+- identifies tables with no usable temporal field
+- produces per-database historical coverage outputs and per-database table/field variants
+- preserves ids and parent context for traceability
+- writes reusable historical base SQL queries
+
+### Historical outputs
+- global outputs:
+  - `output/analysis/reports/historical/historical_candidate_temporal_fields.csv`
+  - `output/analysis/reports/historical/historical_table_depth.csv`
+  - `output/analysis/reports/historical/historical_per_database_coverage.csv`
+  - `output/analysis/reports/historical/historical_per_database_manifest.csv`
+- per-database outputs:
+  - `output/analysis/reports/historical/per_database/database_{database_id}_{database_slug}_historical_candidate_temporal_fields.csv`
+  - `output/analysis/reports/historical/per_database/database_{database_id}_{database_slug}_historical_table_depth.csv`
+- summary outputs:
+  - `output/analysis/reports/historical_summary_overview.json`
+  - `output/analysis/reports/historical_summary_outputs.csv`
+- reusable queries:
+  - `output/analysis/queries/historical_base_fields.sql`
+  - `output/analysis/queries/historical_base_tables.sql`
+
+## Phase 11
+
+### Status
+Implemented
+
+### Scope
+Define the first extraction-ready shortlist of databases, tables, fields, and analytical assets to support downstream analysis and modeling.
+
+### In-scope
+- identifying candidate source tables for downstream extraction
+- identifying priority fields within those tables
+- combining prior signals to assess extraction readiness, including:
+  - completeness
+  - historical depth
+  - observed values
+  - active usage in cards/questions
+  - dashboard usage
+  - duplicate/conflict signals
+- classifying tables/fields into practical extraction categories
+- producing review-friendly outputs for extraction planning
+
+### Out-of-scope
+- building the extraction pipeline
+- querying source systems directly outside Metabase
+- business-rule reconciliation
+- final deprecation/retirement actions
+- UI buildout
+- advanced scoring optimization
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+- outputs from phases 5 through 10
+
+### Required behaviors
+- identify tables that appear suitable for downstream extraction
+- identify fields within those tables that appear suitable for downstream use
+- distinguish between:
+  - recommended for extraction
+  - possibly useful but needs review
+  - low-priority
+  - not recommended based on current evidence
+- preserve the evidence behind each recommendation, such as:
+  - completeness
+  - temporal coverage
+  - usage signals
+  - duplicate/conflict concerns
+- keep all outputs traceable to database, table, and field ids
+- keep the logic transparent and reviewable
+
+### Expected outputs/files
+- extraction candidate reports at the table level
+- extraction candidate reports at the field level
+- summary outputs showing recommended extraction priorities
+- reusable SQL queries supporting those outputs
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- outputs are planning signals, not final extraction decisions
+- do not infer business importance from structure alone
+- do not build the extraction implementation yet
+- optimize for practical downstream planning
+- keep the logic simple and inspectable
+
+### Implementation summary
+- implemented as a separate script: `analyze_extraction.py`
+- combines prior-phase signals into table and field extraction readiness scores (0-100) with category buckets:
+  - `recommended_for_extraction` (`>=75`)
+  - `possibly_useful_needs_review` (`50-74`)
+  - `low_priority` (`25-49`)
+  - `not_recommended_based_on_current_evidence` (`<25`)
+- includes duplicate/conflict signals as explicit flags (no score penalty, no exclusion)
+- preserves evidence signals used in scoring for transparent review
+- writes global and per-database extraction candidate outputs
+- writes reusable extraction base SQL query files
+
+### Extraction outputs
+- global outputs:
+  - `output/analysis/reports/extraction/extraction_table_candidates.csv`
+  - `output/analysis/reports/extraction/extraction_field_candidates.csv`
+  - `output/analysis/reports/extraction/extraction_table_priority_summary.csv`
+  - `output/analysis/reports/extraction/extraction_field_priority_summary.csv`
+  - `output/analysis/reports/extraction/extraction_per_database_manifest.csv`
+- per-database outputs:
+  - `output/analysis/reports/extraction/per_database/database_{database_id}_{database_slug}_extraction_table_candidates.csv`
+  - `output/analysis/reports/extraction/per_database/database_{database_id}_{database_slug}_extraction_field_candidates.csv`
+- summary outputs:
+  - `output/analysis/reports/extraction_summary_overview.json`
+  - `output/analysis/reports/extraction_summary_outputs.csv`
+- reusable queries:
+  - `output/analysis/queries/extraction_table_base.sql`
+  - `output/analysis/queries/extraction_field_base.sql`
+
+## Phase 12
+
+### Status
+Implemented
+
+### Scope
+Assess the adequacy of the available data for the SOW’s modeling objectives by evaluating whether conversion, upsell, and churn can be defined well enough for continued modeling work, and whether the available variables appear strong enough to support those objectives at a high level.
+
+### In-scope
+- defining candidate target/event logic for:
+  - conversion
+  - upsell
+  - churn
+- assessing whether each target appears definable from the available data
+- identifying candidate predictor variables relevant to each objective
+- evaluating high-level predictor adequacy using available signals, including:
+  - completeness
+  - historical depth
+  - distributions/frequency patterns
+  - basic association with the target where feasible
+  - variable co-movement / redundancy
+- surfacing major blockers that would weaken modeling readiness
+- producing review-friendly outputs that support a high-level analyst sniff test
+
+### Out-of-scope
+- building predictive models
+- feature engineering for production use
+- train/test design
+- leakage-proof modeling pipelines
+- causal inference
+- final extraction implementation
+- UI buildout
+
+### Inputs/config
+- DuckDB analysis store from prior phases
+- outputs from phases 9, 10, and 11
+
+### Required behaviors
+- define candidate target logic for conversion, upsell, and churn using available tables, fields, and timestamps
+- indicate whether each objective appears:
+  - definable
+  - partially definable
+  - not yet definable
+- identify candidate predictors for each objective
+- compute simple variable-to-objective strength signals where feasible, using metric types appropriate to the variable
+- surface variables that move together strongly enough to suggest redundancy or proxy behavior
+- preserve the evidence behind each adequacy signal so findings are reviewable
+- support a high-level conclusion of:
+  - enough here to continue
+  - enough here to continue with cautions
+  - major issues should be explored before modeling
+
+### Expected outputs/files
+- objective-level adequacy reports for:
+  - conversion
+  - upsell
+  - churn
+- candidate predictor reports by objective
+- variable association outputs by objective
+- variable co-movement / redundancy outputs
+- high-level summary outputs for modeling adequacy
+- reusable SQL queries supporting those outputs
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- keep the assessment high level and review-oriented
+- do not overclaim modeling readiness
+- do not treat simple association as proof of predictive usefulness
+- do not require every variable type to use the same metric
+- optimize for analyst judgment and SOW support
+- keep the logic simple and inspectable
+
+### Implementation summary
+- implemented as a separate script: `analyze_modeling.py`
+- uses DuckDB base metadata plus prior outputs from phases 9-11 to assess modeling readiness for:
+  - conversion
+  - upsell
+  - churn
+- produces objective-level definability and adequacy conclusions with blocker evidence and high-level recommendation labels
+- generates predictor candidate and variable association outputs per objective, using simple heuristic strength signals for review
+- generates variable redundancy/co-movement signals to flag likely proxy or overlapping variables
+- writes per-database modeling outputs and a manifest using the same per-database output pattern as earlier phases
+- writes reusable modeling base query files for fields and tables
+- supports tenant-by-tenant reset of objective targeting and entity grain via:
+  - `TENANT_CONVERSION_KEYWORDS`
+  - `TENANT_UPSELL_KEYWORDS`
+  - `TENANT_CHURN_KEYWORDS`
+  - `TENANT_ENTITY_GRAIN`
+  - values can be provided in shell env vars or `.env`
+
+### Modeling outputs
+- global outputs:
+  - `output/analysis/reports/modeling/modeling_objective_adequacy.csv`
+  - `output/analysis/reports/modeling/modeling_conversion_adequacy.csv`
+  - `output/analysis/reports/modeling/modeling_conversion_predictor_candidates.csv`
+  - `output/analysis/reports/modeling/modeling_conversion_variable_association.csv`
+  - `output/analysis/reports/modeling/modeling_upsell_adequacy.csv`
+  - `output/analysis/reports/modeling/modeling_upsell_predictor_candidates.csv`
+  - `output/analysis/reports/modeling/modeling_upsell_variable_association.csv`
+  - `output/analysis/reports/modeling/modeling_churn_adequacy.csv`
+  - `output/analysis/reports/modeling/modeling_churn_predictor_candidates.csv`
+  - `output/analysis/reports/modeling/modeling_churn_variable_association.csv`
+  - `output/analysis/reports/modeling/modeling_variable_redundancy.csv`
+  - `output/analysis/reports/modeling/modeling_per_database_manifest.csv`
+- per-database outputs:
+  - `output/analysis/reports/modeling/per_database/database_{database_id}_{database_slug}_modeling_predictor_candidates.csv`
+  - `output/analysis/reports/modeling/per_database/database_{database_id}_{database_slug}_modeling_variable_association.csv`
+  - `output/analysis/reports/modeling/per_database/database_{database_id}_{database_slug}_modeling_variable_redundancy.csv`
+- summary outputs:
+  - `output/analysis/reports/modeling_summary_overview.json`
+  - `output/analysis/reports/modeling_summary_outputs.csv`
+- reusable queries:
+  - `output/analysis/queries/modeling_base_fields.sql`
+  - `output/analysis/queries/modeling_base_tables.sql`
+
+## Phase 13
+
+### Status
+Implemented
+
+### Scope
+Produce a consolidated HTML audit/report that brings together the findings from prior phases into a single navigable deliverable for review, discussion, and SOW support.
+
+### In-scope
+- generating a single HTML report from prior phase outputs
+- including a table of contents and sectioned structure
+- organizing findings into clear review areas, including:
+  - inventory and structural overview
+  - data dictionary
+  - completeness
+  - historical depth
+  - distributions/frequency profiling
+  - duplicate/conflict candidates
+  - retirement/cleanup candidates
+  - extraction readiness
+  - modeling adequacy for conversion, upsell, and churn
+- embedding summary tables and selected charts/visuals where available
+- linking findings back to supporting report files where practical
+- producing a review-friendly document suitable for internal discussion and SOW delivery support
+
+### Out-of-scope
+- interactive web app buildout
+- live querying against DuckDB in the browser
+- automated remediation actions
+- final business decision-making
+- tenant-specific productionization
+- formal presentation deck generation
+
+### Inputs/config
+- outputs from phases 5 through 12
+- DuckDB analysis store where needed for final rollups
+
+### Required behaviors
+- generate a single HTML document with:
+  - title
+  - summary/introduction
+  - table of contents
+  - section headings and subheadings
+  - clearly labeled findings
+  - conclusion / overall assessment
+- present findings in a way that supports both:
+  - analyst review
+  - stakeholder discussion
+- include enough context to explain what each section means without restating every technical detail
+- preserve traceability back to source ids, report files, or supporting evidence where needed
+- keep the report readable, structured, and easy to navigate
+
+### Expected outputs/files
+- a consolidated HTML report
+- supporting assets folder if needed for charts/images/styles
+- optional intermediate summary data files used to assemble the report
+
+### Error handling expectations
+- basic visibility only
+- continue and report where practical
+
+### Constraints/non-goals
+- optimize for clarity, synthesis, and usability
+- do not turn the report into a raw dump of all prior outputs
+- do not overclaim certainty where findings are only signals
+- keep the structure simple, inspectable, and easy to update
+- treat the HTML report as a synthesis layer, not a replacement for raw outputs or DuckDB
+
+### Implementation summary
+- implemented as a separate script: `analyze_report_html.py`
+- generates a single global, non-interactive HTML synthesis report from phase 5-12 outputs
+- uses simple HTML tables only (no chart/image asset pipeline) for review readability
+- includes:
+  - title and summary/introduction
+  - table of contents
+  - sectioned findings across required review areas
+  - conclusion with overall assessment label
+  - source file links for traceability
+- derives an overall assessment label using extraction and modeling signals:
+  - `ready_to_proceed`
+  - `proceed_with_cautions`
+  - `major_gaps`
+- writes lightweight phase summary metadata files for consistency with other phases
+
+### Final report outputs
+- consolidated report:
+  - `output/analysis/reports/final_audit_report.html`
+- summary outputs:
+  - `output/analysis/reports/final_audit_summary_overview.json`
+  - `output/analysis/reports/final_audit_summary_outputs.csv`
